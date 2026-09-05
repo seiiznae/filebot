@@ -259,11 +259,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     code = query.data.split(":",1)[1]
     if not await check_access(context.bot, query.from_user.id):
         await query.answer("❌ Kamu belum memenuhi syarat akses.", show_alert=True)
         return
+    await query.answer()
     await query.edit_message_text("✅ AKSES OK\n\n📤 File sedang dikirim...")
     await deliver(update, context, code)
 
@@ -403,8 +403,8 @@ def main():
     app.add_handler(CommandHandler("setowner",setowner))
     app.add_handler(CallbackQueryHandler(check_button,pattern=r"^check:"))
     app.add_handler(CallbackQueryHandler(admin_callback,pattern=r"^adm:"))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO,receive_file,group=1))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,admin_text_input,group=2))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, receive_file), group=1)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_input), group=2)
     app.add_error_handler(error_handler)
     print("Bot sedang berjalan...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
