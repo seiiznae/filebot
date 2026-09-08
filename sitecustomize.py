@@ -1,8 +1,8 @@
-"""NakaFileBOT Telegram button extensions.
+"""NakaFileBOT premium Telegram UI compatibility layer.
 
-Loaded automatically by Python's site module before bot.py starts.
-Adds Telegram's current inline-button styles and custom-emoji icons without
-requiring secrets or a Premium account token in the bot.
+The main bot keeps Telegram MessageEntity data for configurable text/captions.
+This module adds the one-shot button layout editor and maps Telegram custom
+emoji entities to InlineKeyboardButton.icon_custom_emoji_id.
 """
 import json
 import os
@@ -42,10 +42,14 @@ def _utf16_to_py_index(text, offset):
     return len(text)
 
 
-def _entity_text(text, entity):
+def _py_index_to_utf16(text, index):
+    return len(text[:index].encode("utf-16-le")) // 2
+
+
+def _entity_bounds(text, entity):
     start = _utf16_to_py_index(text, entity.offset)
     end = _utf16_to_py_index(text, entity.offset + entity.length)
-    return text[start:end]
+    return start, end
 
 
 def _style_and_label(raw):
@@ -59,57 +63,109 @@ def _style_and_label(raw):
 
 
 def _parse_button_rows(text, entities):
-    """Parse Group Help-style button syntax.
+    """Parse the full one-shot button layout.
 
-    Rows are separated by newlines, buttons in one row by &&.
-    Each button is `[#g|#r|#p] label - URL` or `... - check`.
-    A single custom emoji entity at the beginning of a button becomes
-    Telegram's icon_custom_emoji_id.
+    Newline = next row.
+    && = same row.
+    #G/#R/#P = green/red/primary button style.
+    `label - URL` = URL button.
+    `label - check` = access-check callback button.
+
+    A leading Telegram custom emoji entity is stored as the button icon and
+    removed from the visible label so Telegram does not show it twice.
     """
-    if not text or " - " not in text:
+    if not text or "-" not in text:
         return []
 
-    # Map each custom emoji to its button segment using UTF-16 offsets.
-    emoji_segments = []
-    for e in entities or []:
-        if getattr(e, "type", None) == "custom_emoji" and getattr(e, "custom_emoji_id", None):
-            emoji_segments.append((_entity_text(text, e), e.custom_emoji_id, e.offset, e.length))
+    custom_entities = []
+    for entity in entities or []:
+        if getattr(entity, "type", None) != "custom_emoji":
+            continue
+        custom_id = getattr(entity, "custom_emoji_id", None)
+        if not custom_id:
+            continue
+        start, end = _entity_bounds(text, entity)
+        custom_entities.append((start, end, custom_id))
 
     rows = []
+    absolute_row_start = 0
     for row_index, line in enumerate(text.splitlines()):
-        line = line.strip()
-        if not line:
+        line_start = absolute_row_start
+        absolute_row_start += len(line) + 1
+        if not line.strip():
             continue
-        parts = [p.strip() for p in line.split("&&") if p.strip()]
+
         parsed_row = []
-        for part in parts:
-            m = re.match(r"^(.*?)\s+-\s+(https?://\S+|check(?::.*)?)\s*$", part, re.IGNORECASE)
-            if not m:
+        # Keep exact Python offsets for each && segment.
+        cursor = 0
+        for raw_part in line.split("&&"):
+            leading = len(raw_part) - len(raw_part.lstrip())
+            part = raw_part.strip()
+            if not part:
+                cursor += len(raw_part) + 2
+                continue
+
+            part_start = line_start + cursor + leading
+            cursor += len(raw_part) + 2
+
+            match = re.match(
+                r"^(.*?)\s+-\s+(https?://\S+|check(?::[^\s]+)?)\s*$",
+                part,
+                re.IGNORECASE,
+            )
+            if not match:
                 return []
-            raw_label, destination = m.group(1).strip(), m.group(2).strip()
+
+            raw_label = match.group(1).strip()
+            destination = match.group(2).strip()
             style, label = _style_and_label(raw_label)
-            kind = "check" if destination.lower().startswith("check") else "url"
-            value = "" if kind == "check" else destination
+
+            # Calculate where the visible label starts inside the original
+            # message, after optional #G/#R/#P and whitespace.
+            style_match = re.match(r"^#([grp])\s+", raw_label, re.IGNORECASE)
+            prefix_len = style_match.end() if style_match else 0
+            raw_label_leading = len(match.group(1)) - len(match.group(1).lstrip())
+            label_start = part_start + raw_label_leading + prefix_len
 
             icon_id = None
-            # Prefer a custom emoji whose entity text occurs in this button label.
-            for emoji_text, custom_id, _off, _length in emoji_segments:
-                if emoji_text and emoji_text in label:
+            remove_start = remove_end = None
+            for ent_start, ent_end, custom_id in custom_entities:
+                if ent_start == label_start:
                     icon_id = custom_id
-                    # Only one custom emoji icon is supported per Telegram button.
+                    remove_start, remove_end = ent_start, ent_end
                     break
 
-            parsed_row.append([label, kind, value, style or "", icon_id or "", row_index])
+            if remove_start is not None:
+                # Remove the fallback emoji from the stored label. The actual
+                # custom emoji will be rendered by icon_custom_emoji_id.
+                local_start = remove_start - label_start
+                local_end = remove_end - label_start
+                label = label[:local_start] + label[local_end:]
+                label = label.strip()
+
+            kind = "check" if destination.lower().startswith("check") else "url"
+            value = "" if kind == "check" else destination
+            parsed_row.append([
+                label,
+                kind,
+                value,
+                style or "",
+                icon_id or "",
+                row_index,
+            ])
+
         if parsed_row:
             rows.append(parsed_row)
+
     return rows
 
 
 async def _capture_button_input(update, context):
-    """Intercept button-editor messages before bot.py's old plain parser."""
+    """Handle the whole button layout before the legacy button parser."""
     main = sys.modules.get("__main__")
     if main is None or not hasattr(main, "admin_sessions"):
         return
+
     msg = getattr(update, "message", None)
     user = getattr(update, "effective_user", None)
     if not msg or not user or not getattr(msg, "text", None):
@@ -117,72 +173,72 @@ async def _capture_button_input(update, context):
     if not getattr(main, "is_admin", lambda _uid: False)(user.id):
         return
 
-    sessions = main.admin_sessions
-    s = sessions.get(user.id)
-    if not s or s.get("action") not in {"add_button", "edit_button"}:
+    session = main.admin_sessions.get(user.id)
+    if not session or session.get("action") not in {"add_button", "edit_button", "button_layout"}:
         return
 
     parsed_rows = _parse_button_rows(msg.text, getattr(msg, "entities", None))
     if not parsed_rows:
         return
 
-    # Persist the custom emoji association as a convenience for future edits.
-    for row in getattr(msg, "entities", None) or []:
-        if getattr(row, "type", None) == "custom_emoji" and getattr(row, "custom_emoji_id", None):
-            key = f"{user.id}|{msg.text}"
-            _EMOJI_MAP[key] = row.custom_emoji_id
+    flat = [button for row in parsed_rows for button in row]
+    cfg = session["draft"]
+
+    # The new editor replaces the complete button layout in one operation.
+    # This is intentionally different from the old one-button-at-a-time flow.
+    cfg["buttons"] = flat
+    session["action"] = "editor"
+
+    # Keep a harmless local association as a diagnostic/fallback cache.
+    for entity in getattr(msg, "entities", None) or []:
+        if getattr(entity, "type", None) == "custom_emoji" and getattr(entity, "custom_emoji_id", None):
+            _EMOJI_MAP[f"{user.id}|{msg.message_id}"] = entity.custom_emoji_id
     _save_map(_EMOJI_MAP)
 
-    flat = [button for row in parsed_rows for button in row]
-    cfg = s["draft"]
-    if s.get("action") == "edit_button":
-        idx = s.get("button_index")
-        if idx is None or idx < 0 or idx >= len(cfg.get("buttons", [])):
-            return
-        cfg["buttons"][idx:idx + 1] = flat
-    else:
-        cfg.setdefault("buttons", []).extend(flat)
-
-    s["action"] = "editor"
     try:
         from telegram.ext import ApplicationHandlerStop
         await msg.reply_text(
-            "🔘 Button masuk draft.\n\n"
-            "✅ Premium Emoji / warna / susunan baris ikut disimpan.\n"
-            "Belum disimpan sampai tekan 💾 Simpan.",
-            reply_markup=main.editor_menu(user.id, s["target"]),
+            "🔘 Layout button masuk ke draft.\n\n"
+            "🎨 #G = hijau • #R = merah • #P = biru\n"
+            "↔️ && = satu baris • Enter = baris berikutnya\n"
+            "💎 Custom Emoji Premium ikut disimpan.\n\n"
+            "Belum tersimpan sampai tekan 💾 Simpan.",
+            reply_markup=main.editor_menu(user.id, session["target"]),
         )
         raise ApplicationHandlerStop
     except ImportError:
         return
 
 
-def _premium_build_keyboard(original):
+def _premium_build_keyboard(_original):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
     def build_keyboard(buttons, code=None):
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         rows = []
-        current_legacy_row = []
         explicit_rows = {}
+        legacy_row = []
 
-        for b in buttons or []:
-            if len(b) < 2:
+        for button in buttons or []:
+            if len(button) < 2:
                 continue
-            label = b[0]
-            kind = b[1]
-            value = b[2] if len(b) > 2 else ""
-            style = b[3] if len(b) > 3 and b[3] else None
-            icon_id = b[4] if len(b) > 4 and b[4] else None
-            row_id = b[5] if len(b) > 5 and b[5] != "" else None
 
-            # Also understand inline style syntax in legacy button labels.
+            label = button[0]
+            kind = button[1]
+            value = button[2] if len(button) > 2 else ""
+            style = button[3] if len(button) > 3 and button[3] else None
+            icon_id = button[4] if len(button) > 4 and button[4] else None
+            row_id = button[5] if len(button) > 5 and button[5] != "" else None
+
             parsed_style, clean_label = _style_and_label(label)
             if parsed_style:
                 style = style or parsed_style
                 label = clean_label
 
-            kwargs = {"style": style} if style else {}
+            kwargs = {}
+            if style in {"primary", "success", "danger"}:
+                kwargs["style"] = style
             if icon_id:
-                kwargs["icon_custom_emoji_id"] = icon_id
+                kwargs["icon_custom_emoji_id"] = str(icon_id)
 
             if kind == "check" and code:
                 btn = InlineKeyboardButton(label, callback_data=f"check:{code}", **kwargs)
@@ -194,16 +250,16 @@ def _premium_build_keyboard(original):
             if row_id is not None:
                 explicit_rows.setdefault(int(row_id), []).append(btn)
             else:
-                if not current_legacy_row or len(current_legacy_row) >= 2:
-                    current_legacy_row = []
-                    rows.append(current_legacy_row)
-                current_legacy_row.append(btn)
+                # Backward compatibility for old three-item buttons.
+                if len(legacy_row) >= 2:
+                    rows.append(legacy_row)
+                    legacy_row = []
+                legacy_row.append(btn)
 
-        if explicit_rows:
-            # New syntax uses row IDs. Append those rows after legacy rows only
-            # when the configuration mixes old and new buttons.
-            for row_id in sorted(explicit_rows):
-                rows.append(explicit_rows[row_id])
+        if legacy_row:
+            rows.append(legacy_row)
+        for row_id in sorted(explicit_rows):
+            rows.append(explicit_rows[row_id])
 
         return InlineKeyboardMarkup(rows) if rows else None
 
@@ -211,24 +267,24 @@ def _premium_build_keyboard(original):
 
 
 try:
-    # The Telegram package is installed by the time the app starts.
     from telegram.ext import Application, MessageHandler, filters
 
-    _orig_run_polling = Application.run_polling
+    _original_run_polling = Application.run_polling
 
     def _run_polling_with_naka_extensions(self, *args, **kwargs):
         main = sys.modules.get("__main__")
         if main is not None and hasattr(main, "build_keyboard"):
             main.build_keyboard = _premium_build_keyboard(main.build_keyboard)
 
-        # Group -1 runs before bot.py's normal group-0 text handler.
+        # Run before bot.py's normal text handler so the legacy parser cannot
+        # overwrite the complete layout or discard MessageEntity data.
         self.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, _capture_button_input),
             group=-1,
         )
-        return _orig_run_polling(self, *args, **kwargs)
+        return _original_run_polling(self, *args, **kwargs)
 
     Application.run_polling = _run_polling_with_naka_extensions
 except Exception:
-    # Never prevent the bot from starting if this optional extension fails.
+    # Optional compatibility layer must never prevent the bot from starting.
     pass
