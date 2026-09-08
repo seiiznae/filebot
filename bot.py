@@ -651,6 +651,7 @@ def main():
     app.add_handler(CommandHandler("setpayment",setpayment)); app.add_handler(CommandHandler("setchannel",setchannel)); app.add_handler(CommandHandler("setgroup",setgroup)); app.add_handler(CommandHandler("setowner",setowner))
     app.add_handler(CallbackQueryHandler(check_button,pattern=r"^check:"))
     app.add_handler(CallbackQueryHandler(admin_callback,pattern=r"^adm:"))
+    app.add_handler(CallbackQueryHandler(admin_callback,pattern=r"^edit:"))
     app.add_handler(CallbackQueryHandler(button_callback,pattern=r"^btn:"))
     app.add_handler(MessageHandler(filters.PHOTO|filters.VIDEO|filters.ANIMATION|filters.Document.ALL|filters.AUDIO,receive_admin_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,admin_text_input))
