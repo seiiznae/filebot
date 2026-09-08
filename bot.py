@@ -130,7 +130,7 @@ def init_db():
         "peraturan": ("Peraturan Nakahoshi", {"text": "📜 PERATURAN NAKAHOSHI\n\nSilakan isi peraturan Nakahoshi melalui Admin Panel.", "entities": [], "media_id": "", "media_type": "", "buttons": []}),
         "unbanned": ("Pengajuan unban akun", {"text": DEFAULT_UNBAN_TEXT, "entities": [], "media_id": "", "media_type": "", "buttons": [["📝 AJUKAN UNBAN", "url", DEFAULT_OWNER_LINK]]}),
         "joinvip": ("Membership Nakahoshi", {"text": "⭐ JOIN VIP\n\nCuma Rp15.000 / 30 Hari. Murah banget 😝", "entities": [], "media_id": "", "media_type": "", "buttons": [["⭐ JOIN MEMBERSHIP", "url", DEFAULT_PAYMENT_LINK]]}),
-        "listChannel": ("List channel Nakahoshi", {"text": "📚 LIST CHANNEL NAKAHOSHI\n\nSilakan pilih channel/folder yang ingin kamu buka 👇", "entities": [], "media_id": "", "media_type": "", "buttons": []}),
+        "listchannel": ("List channel Nakahoshi", {"text": "📚 LIST CHANNEL NAKAHOSHI\n\nSilakan pilih channel/folder yang ingin kamu buka 👇", "entities": [], "media_id": "", "media_type": "", "buttons": []}),
         "customerservice": ("Hubungi Customer Service", {"text": DEFAULT_CS_TEXT, "entities": [], "media_id": "", "media_type": "", "buttons": [["👤 HUBUNGI ADMIN", "url", DEFAULT_OWNER_LINK]]}),
     }
     for command, (desc, config) in default_commands.items():
@@ -417,7 +417,7 @@ async def admin_callback(update,context):
     if data=="adm:commands":
         conn=db(); rows=conn.execute("SELECT command,description,enabled FROM user_commands ORDER BY command").fetchall(); conn.close(); kb=[]
         for r in rows: kb.append([InlineKeyboardButton(("🟢 " if r["enabled"] else "🔴 ")+"/"+r["command"],callback_data=f"adm:cmd:{r['command']}")])
-        kb.append([InlineKeyboardButton("➕ Tambah Command",callback_data="adm:addcmd")],[InlineKeyboardButton("⬅️ Kembali",callback_data="adm:home")]); await q.edit_message_text("👤 USER COMMAND\n\nPilih command:",reply_markup=InlineKeyboardMarkup(kb)); return
+        kb.append([InlineKeyboardButton("➕ Tambah Command",callback_data="adm:addcmd")]); kb.append([InlineKeyboardButton("⬅️ Kembali",callback_data="adm:home")]); await q.edit_message_text("👤 USER COMMAND\n\nPilih command:",reply_markup=InlineKeyboardMarkup(kb)); return
     if data.startswith("adm:cmd:"):
         command=data.split(":",2)[2]; session(uid,"cmd/"+command); row=user_command(command); status="🟢 AKTIF" if row and row["enabled"] else "🔴 NONAKTIF"; base=editor_menu(uid,"cmd/"+command).inline_keyboard; base.append([InlineKeyboardButton("🔄 Aktif/Nonaktif",callback_data=f"adm:toggle:{command}"),InlineKeyboardButton("🗑️ Hapus",callback_data=f"adm:deletecmd:{command}")]); await q.edit_message_text(f"⚙️ EDIT /{command}\nStatus: {status}\n\nMedia + Text + Buttons + Preview",reply_markup=InlineKeyboardMarkup(base)); return
     if data=="adm:addcmd": admin_sessions[uid]={"action":"add_command"}; await q.edit_message_text("➕ TAMBAH COMMAND\n\nKirim format:\n/nama | Deskripsi",reply_markup=cancel_kb()); return
@@ -522,7 +522,7 @@ async def admin_text_input(update,context):
     msg=update.message; s=admin_sessions.get(uid); action=s.get("action") if s else None
     if action=="broadcast":
         s["broadcast_message_id"]=msg.message_id; s["broadcast_chat_id"]=uid; s["action"]="broadcast_confirm"; await msg.reply_text("📢 Pesan siap dibroadcast.\n\nKetik /broadcast_confirm untuk KIRIM ke semua user, atau /cancel untuk batal."); return
-    if action in ("add_command",):
+    if action=="add_command":
         m=re.match(r"^/?([a-zA-Z0-9_]+)\s*\|\s*(.+)$",msg.text.strip())
         if not m: await msg.reply_text("Format salah. Contoh: /help | Bantuan Nakahoshi"); return
         cmd,desc=m.group(1).lower(),m.group(2); reserved={"start","admin","batch","done","cancelbatch","cancel","broadcast","broadcast_confirm","setpayment","setchannel","setgroup","setowner"}
@@ -582,6 +582,13 @@ async def done_command(update,context):
     code=create_batch(uid,items); await update.message.reply_text(f"✅ BATCH SELESAI\n\n📦 Total: {len(items)}\n🔗 https://t.me/{context.bot.username}?start={code}\n\nCode: {code}")
 
 
+async def start_broadcast(update,context):
+    uid=update.effective_user.id
+    if not is_admin(uid): return
+    admin_sessions[uid]={"action":"broadcast"}
+    await update.message.reply_text("📢 BROADCAST\n\nKirim satu pesan/media yang ingin dibroadcast.\nSetelah itu ketik /broadcast_confirm untuk KIRIM ke semua user, atau /cancel untuk batal.",protect_content=protect())
+
+
 async def broadcast_confirm(update,context):
     uid=update.effective_user.id
     if not is_admin(uid): return
@@ -639,7 +646,7 @@ def main():
     app.add_handler(CommandHandler("done",done_command))
     app.add_handler(CommandHandler("cancelbatch",cancel_command))
     app.add_handler(CommandHandler("cancel",cancel_command))
-    app.add_handler(CommandHandler("broadcast",lambda u,c: broadcast_confirm(u,c)))
+    app.add_handler(CommandHandler("broadcast",start_broadcast))
     app.add_handler(CommandHandler("broadcast_confirm",broadcast_confirm))
     app.add_handler(CommandHandler("setpayment",setpayment)); app.add_handler(CommandHandler("setchannel",setchannel)); app.add_handler(CommandHandler("setgroup",setgroup)); app.add_handler(CommandHandler("setowner",setowner))
     app.add_handler(CallbackQueryHandler(check_button,pattern=r"^check:"))
